@@ -14,16 +14,18 @@ class ModelData:
 class MatrixFactorizationModel(torch.nn.Module):
 
     def __init__(self, n_users: int, n_notes: int, 
-            exp_user_factors: np.array, exp_item_factors: np.array, 
+            exp_user_factors: np.array=None, exp_item_factors: np.array=None, 
             n_components=1):
         super().__init__()
         self.n_users = n_users
         self.n_notes = n_notes
 
         # # embeddings for substitute confounder
-        self.confounder_weights = torch.nn.Embedding(n_notes, 1, sparse=False)
-        self.exp_user_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_user_factors))
-        self.exp_item_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_item_factors))
+        self.use_subconfounder = exp_user_factors is not None and exp_item_factors is not None
+        if self.use_subconfounder:
+          self.confounder_weights = torch.nn.Embedding(n_notes, 1, sparse=False)
+          self.exp_user_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_user_factors))
+          self.exp_item_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_item_factors))
 
         # embeddings for user and note
         self.user_factors = torch.nn.Embedding(n_users, n_components, sparse=False)
@@ -63,10 +65,12 @@ class MatrixFactorizationModel(torch.nn.Module):
       )
       treatment_effect = treatment_effect * exp_labels
       pred += treatment_effect
-      sub_confounder = (self.exp_user_factors(data.user_idxs) * self.exp_item_factors(data.note_idxs)).sum(
-        1, keepdim=True)
-      sub_confounder = self.confounder_weights(data.note_idxs) * sub_confounder
-      pred += sub_confounder
+      if self.use_subconfounder:
+        sub_confounder = (
+          self.exp_user_factors(data.user_idxs) 
+          * self.exp_item_factors(data.note_idxs)).sum(1, keepdim=True)
+        sub_confounder = self.confounder_weights(data.note_idxs) * sub_confounder
+        pred += sub_confounder
       return pred.squeeze()
     
     def forward_majority_vote(self):
@@ -78,13 +82,17 @@ class MatrixFactorizationModel(torch.nn.Module):
       note_maj_votes = []
       mean_user_bias = self.user_intercepts.weight.mean(0)
       mean_user_factor = self.user_factors.weight.mean(0)
-      mean_exp_user_factor = self.exp_user_factors.weight.mean(0)
+      if self.use_subconfounder:
+        mean_exp_user_factor = self.exp_user_factors.weight.mean(0)
       for note_idx in range(self.n_notes):
         note_idx = torch.LongTensor([note_idx]).to(self.device)
         treatment_scores = (self.note_factors(note_idx) @ mean_user_factor + mean_user_bias).squeeze()
-        sub_confounder_scores = (self.exp_item_factors(note_idx) @ mean_exp_user_factor).squeeze()
         note_intercept = self.note_intercepts(note_idx).squeeze()
-        mean_pred = (treatment_scores + sub_confounder_scores + self.global_intercept + note_intercept).item()
+        mean_pred = treatment_scores + self.global_intercept + note_intercept
+        if self.use_subconfounder:
+          sub_confounder_scores = (self.exp_item_factors(note_idx) @ mean_exp_user_factor).squeeze()
+          mean_pred += sub_confounder_scores
+        mean_pred = mean_pred.item()
         note_maj_votes.append(mean_pred)
       return note_maj_votes
     
@@ -99,8 +107,9 @@ class MatrixFactorizationModel(torch.nn.Module):
       with torch.no_grad():
         recon_matrix = self.note_factors(note_idxs) @ self.user_factors.weight.T
         recon_matrix += self.global_intercept + self.user_intercepts.weight.T + self.note_intercepts(note_idxs)
-        sub_confounder = self.exp_item_factors(note_idxs) @ self.exp_user_factors.weight.T
-        recon_matrix += sub_confounder
+        if self.use_subconfounder:
+          sub_confounder = self.exp_item_factors(note_idxs) @ self.exp_user_factors.weight.T
+          recon_matrix += sub_confounder
       return recon_matrix
     
     def get_vote_scores(self, agg_func: Callable, batch_size: int=1024):
