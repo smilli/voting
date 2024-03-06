@@ -20,7 +20,7 @@ class MatrixFactorizationModel(torch.nn.Module):
         self.n_users = n_users
         self.n_notes = n_notes
 
-        # # embeddings for substitute confounder
+        # embeddings for substitute confounder
         self.use_subconfounder = exp_user_factors is not None and exp_item_factors is not None
         if self.use_subconfounder:
           self.confounder_weights = torch.nn.Embedding(n_notes, 1, sparse=False)
@@ -33,12 +33,8 @@ class MatrixFactorizationModel(torch.nn.Module):
         torch.nn.init.xavier_uniform_(self.user_factors.weight)
         torch.nn.init.xavier_uniform_(self.note_factors.weight)
 
-        # intercepts
-        self.user_intercepts = torch.nn.Embedding(n_users, 1, sparse=False)
-        self.note_intercepts = torch.nn.Embedding(n_notes, 1, sparse=False)
+        # global intercept
         self.global_intercept = torch.nn.parameter.Parameter(torch.zeros(1, 1))
-        self.user_intercepts.weight.data.fill_(0.0)
-        self.note_intercepts.weight.data.fill_(0.0)
 
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.to(self.device)
@@ -55,16 +51,12 @@ class MatrixFactorizationModel(torch.nn.Module):
       Returns:
           torch.FloatTensor: predicted rating, shape (batch_size,)
       """
-      pred = (self.global_intercept 
-        + self.user_intercepts(data.user_idxs) 
-        + self.note_intercepts(data.note_idxs)
-      )
       exp_labels = data.exp_labels.unsqueeze(1)
       treatment_effect = (self.user_factors(data.user_idxs) * self.note_factors(data.note_idxs)).sum(
         1, keepdim=True
       )
       treatment_effect = treatment_effect * exp_labels
-      pred += treatment_effect
+      pred = treatment_effect + self.global_intercept
       if self.use_subconfounder:
         sub_confounder = (
           self.exp_user_factors(data.user_idxs) 
@@ -80,15 +72,13 @@ class MatrixFactorizationModel(torch.nn.Module):
       and returns the majority vote for each note.
       """
       note_maj_votes = []
-      mean_user_bias = self.user_intercepts.weight.mean(0)
       mean_user_factor = self.user_factors.weight.mean(0)
       if self.use_subconfounder:
         mean_exp_user_factor = self.exp_user_factors.weight.mean(0)
       for note_idx in range(self.n_notes):
         note_idx = torch.LongTensor([note_idx]).to(self.device)
-        treatment_scores = (self.note_factors(note_idx) @ mean_user_factor + mean_user_bias).squeeze()
-        note_intercept = self.note_intercepts(note_idx).squeeze()
-        mean_pred = treatment_scores + self.global_intercept + note_intercept
+        treatment_scores = (self.note_factors(note_idx) @ mean_user_factor).squeeze()
+        mean_pred = treatment_scores + self.global_intercept
         if self.use_subconfounder:
           sub_confounder_scores = (self.exp_item_factors(note_idx) @ mean_exp_user_factor).squeeze()
           mean_pred += sub_confounder_scores
@@ -106,7 +96,7 @@ class MatrixFactorizationModel(torch.nn.Module):
       self.eval()
       with torch.no_grad():
         recon_matrix = self.note_factors(note_idxs) @ self.user_factors.weight.T
-        recon_matrix += self.global_intercept + self.user_intercepts.weight.T + self.note_intercepts(note_idxs)
+        recon_matrix += self.global_intercept
         if self.use_subconfounder:
           sub_confounder = self.exp_item_factors(note_idxs) @ self.exp_user_factors.weight.T
           recon_matrix += sub_confounder
@@ -161,13 +151,15 @@ class MatrixFactorizationModel(torch.nn.Module):
         )
     
 
-    def loss(self, data: ModelData):
+    def loss(self, data: ModelData, reg=0.1):
       """
       Loss function: MSE with regularization
 
       r_{un} - r_hat_{un} + lambda_i * (mu^2 + ||i_u||^2 + ||i_n||^2) + lambda_f * (||f_u||^2 + ||f_n||^2)
 
-      Args: data: ModelData object
+      Args: 
+        data: ModelData object,
+        reg: regularization parameter
 
       Returns:
           torch.FloatTensor: loss, shape (1,)
@@ -176,10 +168,8 @@ class MatrixFactorizationModel(torch.nn.Module):
 
       l2_reg_loss = torch.tensor(0.0).to(self.device)
       l2_reg_loss += torch.nn.functional.mse_loss(pred, data.rating_labels)
-      l2_reg_loss += 0.1 * (
+      l2_reg_loss += reg * (
         (self.global_intercept ** 2).mean()
-        + (self.user_intercepts.weight**2).mean()
-        + (self.note_intercepts.weight**2).mean()
         + (self.user_factors.weight**2).mean()
         + (self.note_factors.weight**2).mean()
       )
