@@ -51,11 +51,12 @@ class MatrixFactorizationModel(torch.nn.Module):
       Returns:
           torch.FloatTensor: predicted rating, shape (batch_size,)
       """
-      exp_labels = data.exp_labels.unsqueeze(1)
       treatment_effect = (self.user_factors(data.user_idxs) * self.note_factors(data.note_idxs)).sum(
         1, keepdim=True
       )
-      treatment_effect = treatment_effect * exp_labels
+      if self.use_subconfounder:
+        exp_labels = data.exp_labels.unsqueeze(1)
+        treatment_effect = treatment_effect * exp_labels
       pred = treatment_effect + self.global_intercept
       if self.use_subconfounder:
         sub_confounder = (
@@ -81,6 +82,7 @@ class MatrixFactorizationModel(torch.nn.Module):
         mean_pred = treatment_scores + self.global_intercept
         if self.use_subconfounder:
           sub_confounder_scores = (self.exp_item_factors(note_idx) @ mean_exp_user_factor).squeeze()
+          sub_confounder_scores = self.confounder_weights(note_idx) * sub_confounder_scores
           mean_pred += sub_confounder_scores
         mean_pred = mean_pred.item()
         note_maj_votes.append(mean_pred)
@@ -99,6 +101,7 @@ class MatrixFactorizationModel(torch.nn.Module):
         recon_matrix += self.global_intercept
         if self.use_subconfounder:
           sub_confounder = self.exp_item_factors(note_idxs) @ self.exp_user_factors.weight.T
+          sub_confounder = self.confounder_weights(note_idxs) * sub_confounder
           recon_matrix += sub_confounder
       return recon_matrix
     
@@ -203,13 +206,13 @@ class MatrixFactorizationModel(torch.nn.Module):
       return curr_data
 
     def fit(self, 
-            data: ModelData, 
-            epochs: int = 10, 
-            lr: float = 0.1,
-            print_interval: int = 1,
-            validate_fraction: float = 0.1,
-            print_loss: bool = False,
-            ):
+      data: ModelData,
+      epochs: int = 10,
+      lr: float = 0.1,
+      print_interval: int = 1,
+      validate_fraction: float = 0.1,
+      print_loss: bool = False,
+    ):
         """
         Fit model to data
 
