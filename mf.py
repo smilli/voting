@@ -20,18 +20,27 @@ class MatrixFactorizationModel(torch.nn.Module):
         self.n_users = n_users
         self.n_notes = n_notes
 
+        # embeddings for user and note
+        self.user_factors = torch.nn.Embedding(n_users, n_components, sparse=False)
+        self.note_factors = torch.nn.Embedding(n_notes, n_components, sparse=False)
+        torch.nn.init.xavier_uniform_(self.user_factors.weight)
+        torch.nn.init.xavier_uniform_(self.note_factors.weight)
+        # standard deviation of uniform RVs used for initialization
+        users_std = np.sqrt(6/(n_users+n_components))/np.sqrt(3)
+        notes_std = np.sqrt(6/(n_notes+n_components))/np.sqrt(3)
+
         # embeddings for substitute confounder
         self.use_subconfounder = exp_user_factors is not None and exp_item_factors is not None
         if self.use_subconfounder:
           self.confounder_weights = torch.nn.Embedding(n_users, 1, sparse=False)
           self.exp_user_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_user_factors))
           self.exp_item_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_item_factors))
-
-        # embeddings for user and note
-        self.user_factors = torch.nn.Embedding(n_users, n_components, sparse=False)
-        self.note_factors = torch.nn.Embedding(n_notes, n_components, sparse=False)
-        torch.nn.init.xavier_uniform_(self.user_factors.weight)
-        torch.nn.init.xavier_uniform_(self.note_factors.weight)
+          # normalize factors to be zero-mean and match the scale of user and note factors
+          # normalization doesn't seem to make a huge difference, may remove in ablation later
+          self.exp_user_factors.weight.data = self.exp_user_factors.weight.data - torch.mean(self.exp_user_factors.weight)
+          self.exp_item_factors.weight.data = self.exp_item_factors.weight.data - torch.mean(self.exp_item_factors.weight)
+          self.exp_user_factors.weight.data = self.exp_user_factors.weight.data / torch.std(self.exp_user_factors.weight) * users_std
+          self.exp_item_factors.weight.data = self.exp_item_factors.weight.data / torch.std(self.exp_item_factors.weight) * notes_std
 
         # global intercept
         self.global_intercept = torch.nn.parameter.Parameter(torch.zeros(1, 1))
