@@ -41,6 +41,9 @@ class MatrixFactorizationModel(torch.nn.Module):
           self.exp_item_factors.weight.data = self.exp_item_factors.weight.data - torch.mean(self.exp_item_factors.weight)
           self.exp_user_factors.weight.data = self.exp_user_factors.weight.data / torch.std(self.exp_user_factors.weight) * users_std
           self.exp_item_factors.weight.data = self.exp_item_factors.weight.data / torch.std(self.exp_item_factors.weight) * notes_std
+        else:
+          self.user_intercepts = torch.nn.Embedding(n_users, 1, sparse=False)
+          self.note_intercepts = torch.nn.Embedding(n_notes, 1, sparse=False)
 
         # global intercept
         self.global_intercept = torch.nn.parameter.Parameter(torch.zeros(1, 1))
@@ -74,29 +77,41 @@ class MatrixFactorizationModel(torch.nn.Module):
           * self.exp_item_factors(data.note_idxs)).sum(1, keepdim=True)
         sub_confounder = self.confounder_weights(data.user_idxs) * sub_confounder
         pred += sub_confounder
+      else:
+        pred += self.user_intercepts(data.user_idxs) + self.note_intercepts(data.note_idxs)
       return pred.squeeze()
     
     def get_votes(self, note_idxs: torch.LongTensor):
       """
       Gets the predicted votes from all users for each note in note_idxs.
 
+      Args:
+        note_idxs: note indices, shape (len(note_idxs),)
+
       Returns:
         torch.FloatTensor: predicted votes, shape (len(note_idxs), n_users)
       """
       self.eval()
       with torch.no_grad():
-        recon_matrix = self.note_factors(note_idxs) @ self.user_factors.weight.T
+        recon_matrix = self.note_factors(note_idxs) @ self.user_factors.weight.T # output shape = (len(note_idxs), n_users)
         recon_matrix += self.global_intercept
         if self.use_subconfounder:
-          sub_confounder = self.exp_item_factors(note_idxs) @ self.exp_user_factors.weight.T
-          sub_confounder = self.confounder_weights.weight.T * sub_confounder
+          sub_confounder = self.exp_item_factors(note_idxs) @ self.exp_user_factors.weight.T # output shape = (len(note_idxs), n_users)
+          sub_confounder = self.confounder_weights.weight.T * sub_confounder # (1, n_users) * (len(note_idxs), n_users)
           recon_matrix += sub_confounder
+        else:
+          recon_matrix += self.note_intercepts(note_idxs) # (len(note_idxs), n_users) + (len(note_idxs), 1)
+          recon_matrix += self.user_intercepts.weight.T # (len(note_idxs, n_users) + (1, n_users)
       return recon_matrix
     
     def get_vote_scores(self, agg_func: Callable, batch_size: int=1024):
       """
       Predicts votes from all users on all notes
       and aggregates predicted votes according to agg_func.
+
+      Args:
+        agg_func: aggregation function, e.g. torch.mean
+        batch_size: batch size for prediction
       """
       self.eval()
       vote_scores = []
@@ -163,6 +178,8 @@ class MatrixFactorizationModel(torch.nn.Module):
         (self.global_intercept ** 2).mean()
         + (self.user_factors.weight**2).mean()
         + (self.note_factors.weight**2).mean()
+        + (self.user_intercepts.weight**2).mean()
+        + (self.note_intercepts.weight**2).mean()
       )
       return l2_reg_loss
     
