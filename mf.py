@@ -30,17 +30,23 @@ class MatrixFactorizationModel(torch.nn.Module):
         notes_std = np.sqrt(6/(n_notes+n_components))/np.sqrt(3)
 
         # embeddings for substitute confounder
-        self.use_subconfounder = exp_user_factors is not None and exp_item_factors is not None
-        if self.use_subconfounder:
+        self.use_subconfounder = exp_user_factors is not None
+        if exp_user_factors is not None:
           self.confounder_weights = torch.nn.Embedding(n_users, 1, sparse=False)
           self.exp_user_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_user_factors))
-          self.exp_item_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_item_factors))
           # normalize factors to be zero-mean and match the scale of user and note factors
           # normalization doesn't seem to make a huge difference, may remove in ablation later
           self.exp_user_factors.weight.data = self.exp_user_factors.weight.data - torch.mean(self.exp_user_factors.weight)
-          self.exp_item_factors.weight.data = self.exp_item_factors.weight.data - torch.mean(self.exp_item_factors.weight)
           self.exp_user_factors.weight.data = self.exp_user_factors.weight.data / torch.std(self.exp_user_factors.weight) * users_std
-          self.exp_item_factors.weight.data = self.exp_item_factors.weight.data / torch.std(self.exp_item_factors.weight) * notes_std
+          # if exp_item_factors is provided, use those weights, otherwise learn them
+          if exp_item_factors is not None:
+            self.exp_item_factors = torch.nn.Embedding.from_pretrained(torch.FloatTensor(exp_item_factors))
+            self.exp_item_factors.weight.data = self.exp_item_factors.weight.data / torch.std(self.exp_item_factors.weight) * notes_std
+            self.exp_item_factors.weight.data = self.exp_item_factors.weight.data - torch.mean(self.exp_item_factors.weight)
+          else:
+            subconf_components = exp_user_factors.shape[1]
+            self.exp_item_factors = torch.nn.Embedding(n_notes, subconf_components, sparse=False)
+            torch.nn.init.xavier_uniform_(self.exp_item_factors.weight)
 
         # global intercept
         self.global_intercept = torch.nn.parameter.Parameter(torch.zeros(1, 1))
@@ -141,8 +147,24 @@ class MatrixFactorizationModel(torch.nn.Module):
           exp_labels=data.exp_labels[val_idxs]
         )
     
+    def weighted_mse_loss(self, data: ModelData, neg_samples_weight=0.3):
+      """
+      Weighted MSE loss function
 
-    def loss(self, data: ModelData, reg=0.1):
+      Args: 
+        data: ModelData object,
+        neg_samples_weight: weight of negative samples
+
+      Returns:
+          torch.FloatTensor: loss, shape (1,)
+      """
+      pred = self.forward(data)
+      weights = data.exp_labels + neg_samples_weight * (1 - data.exp_labels)
+      loss = torch.nn.functional.mse_loss(pred, data.rating_labels, reduction='none')
+      loss = (loss * weights).mean()
+      return loss
+
+    def loss(self, data: ModelData, neg_samples_weight=0.3, reg=0.1):
       """
       Loss function: MSE with regularization
 
@@ -155,10 +177,7 @@ class MatrixFactorizationModel(torch.nn.Module):
       Returns:
           torch.FloatTensor: loss, shape (1,)
       """
-      pred = self.forward(data)
-
-      l2_reg_loss = torch.tensor(0.0).to(self.device)
-      l2_reg_loss += torch.nn.functional.mse_loss(pred, data.rating_labels)
+      l2_reg_loss = self.weighted_mse_loss(data, neg_samples_weight)
       l2_reg_loss += reg * (
         (self.global_intercept ** 2).mean()
         + (self.user_factors.weight**2).mean()
